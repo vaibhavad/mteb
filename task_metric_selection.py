@@ -1,5 +1,8 @@
 import os
 import json
+import argparse
+
+from multiprocessing import Pool
 
 from tqdm import tqdm
 
@@ -19,9 +22,20 @@ from huggingface_hub import HfApi
 
 import pandas as pd
 
+from scipy.stats import spearmanr
+from scipy.stats import pearsonr
+
+import xgboost as xgb
+
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 MODEL_INFOS = {}
+
+def spearman(x, y):
+    return spearmanr(x, y)[0]
+
+def pearson(x, y):
+    return pearsonr(x, y)[0]
 
 def get_leaderboard_df():
     download_dir = snapshot_download(
@@ -123,73 +137,104 @@ def get_leaderboard_df():
 
     df.to_csv("results.csv", index=False)
 
-def get_mse_scores(df):
-    # remove overall column
-    df_train = df.drop(columns=["Overall", "Model"])
+def _fit_predict(model_i, task, task_df, classifer):
+    clf = classifer()
+    X_train = task_df.drop([task], axis=1).drop(model_i)
+    y_train = task_df[[task]].drop(model_i)
+    clf.fit(X_train.values, y_train.values)
+    X_test = task_df.drop(columns=[task]).iloc[model_i]
+    y_pred = clf.predict(X_test.values.reshape(1, -1))
+    return float(y_pred)
 
-    # make a new df for mse scores, same columns as df_train, with "Model" as index
-    df_mse_models = pd.DataFrame(columns=df_train.columns)
+def leave_one_task_out(df: pd.DataFrame, classifer, num_cpus) -> pd.DataFrame:
+    """Predicts the performance of a model on a task by training on all other tasks.
     
-    # apply linear regression, training data will leave one row out, y is on of the columns, X is the rest
-    for i in tqdm(range(len(df_train))):
-        for col in tqdm(df_train.columns):
-            X_train, y_train = df_train.drop(index=i).drop(columns=[col]), df_train.drop(index=i)[col]
-            X_test, y_test = df_train.drop(columns=[col]).iloc[i], df_train[col].iloc[i]
+    Args:
+        df: a DataFrame with columns: Model, Overall, and one column for each task.
+        classifer: a scikit-learn model that has a fit and predict method. 
 
-            reg = LinearRegression().fit(X_train, y_train)
-            mse_score = mean_squared_error(reg.predict(X_test.values.reshape(1, -1)), [y_test])
+    Returns:
+        a matrix of predictions for each model and task.
+    """
+    predictions = pd.DataFrame(columns=df.columns)
+    # for task in df.columns:
+    task_df = df.drop(["Model", "Overall"], axis=1)
+    columns_tqdm = tqdm(task_df.columns)
+    for task in columns_tqdm:
+        columns_tqdm.set_description(f"Task: {task}")
 
-            df_mse_models.loc[i, col] = mse_score
-    
-    # take transpose of df_mse
-    df_mse_tasks = df_mse_models.T
+        with Pool(num_cpus) as p:
+            task_predictions = p.starmap(_fit_predict, [(model_i, task, task_df, classifer) for model_i in range(len(df))])
+        predictions[task] = list(task_predictions)
 
-    df_mse_models["Avg. MSE"] = df_mse_models.mean(axis=1)
-    df_mse_tasks["Avg. MSE"] = df_mse_tasks.mean(axis=1)
-    
-    # add Model column
-    df_mse_models["Model"] = df["Model"]
-    
-    # make Model column first, Overall column second
-    cols = df_mse_models.columns.tolist()
-    cols = ["Model", "Avg. MSE"] + [col for col in cols if col not in ["Model", "Avg. MSE"]]
-    df_mse_models = df_mse_models[cols]
-    # sort by Overall
-    df_mse_models = df_mse_models.sort_values("Avg. MSE", ascending=True)
+    # add the model names and overall scores    
+    predictions["Model"] = df["Model"]
+    return predictions
 
-    df_mse_models.to_csv("mse_models_results.csv", index=False)
+def calculate_task_scores(observed_results: pd.DataFrame, predictions: pd.DataFrame, metric) -> pd.DataFrame:
+    """Calculate how well the predictions match the observed results.
 
-    # name index column to Task
-    df_mse_tasks.index.name = "Task"
+    Args:
+        observed_results: a DataFrame with columns: Model, Overall, and one column for each task.
+        predictions: a DataFrame with columns: Model, Overall, and one column for each task.
+        metric: a function that takes two lists of numbers and returns a single number.
 
-    # make Task column first, Overall column second
-    cols = df_mse_tasks.columns.tolist()
-    cols = ["Avg. MSE"] + [col for col in cols if col not in ["Task", "Avg. MSE"]]
-    df_mse_tasks = df_mse_tasks[cols]
+    Returns:
+        a DataFrame with a single row that contains the score for each task.
+    """
+    scores = {}
+    for task in predictions.columns:
+        if task not in ["Model", "Overall"]:
+            scores[task] = metric(predictions[task], observed_results[task])
+    return pd.DataFrame(scores, index=[0])
 
-    # sort by Overall
-    df_mse_tasks = df_mse_tasks.sort_values("Avg. MSE", ascending=True)
+def main(args):
 
-    df_mse_tasks.to_csv("mse_tasks_results.csv")
-    
+    metric_map = {
+        "spearman": spearman,
+        "pearson": pearson,
+        "mse": mean_squared_error
+    }
 
-if __name__ == "__main__":
+    ascending = True if args.metric == "mse" else False 
+
     if not os.path.exists("results.csv"):
         get_leaderboard_df()
     df = pd.read_csv("results.csv")
 
-    if not os.path.exists("mse_models_results.csv") or not os.path.exists("mse_tasks_results.csv"):
-        get_mse_scores(df)
+    model = xgb.XGBRegressor if args.model == "xgboost" else LinearRegression
+
+    removed_tasks = []
+
+    print(f"Using Model {args.model} and Metric {args.metric}")
+
+    for i in range(args.num_iterations):
+        predictions = leave_one_task_out(df, model, args.num_cpus)
+        results = calculate_task_scores(df, predictions, metric_map[args.metric])
+
+        print(f"{args.metric} (ascending={ascending})")
+        print(results.T.sort_values(by=0, ascending=ascending).head(3))
+
+        # remove the top task from the results
+        task = results.T.sort_values(by=0, ascending=ascending).head(1).index[0]
+        print()
+        print(f"Removing task: {task}")
+        print()
+        df = df.drop(columns=[task])
+        removed_tasks.append(task)
+
+    print()
+    print("Removed tasks:")
+    for task in removed_tasks:
+        print(task)
     
-    df_mse_models = pd.read_csv("mse_models_results.csv")
-    df_mse_tasks = pd.read_csv("mse_tasks_results.csv")
+    df.to_csv("final_results.csv", index=False)
 
-    # remove index column
-    df_mse_tasks = df_mse_tasks.set_index("Task")
-    df_mse_models = df_mse_models.set_index("Model")
-
-    print(df_mse_tasks.iloc[:10, [0]].to_markdown())
-    print(df_mse_models.iloc[:10, [0]].to_markdown())
-
-
-
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, default="linear", help="Model to use for training.", choices=["xgboost", "linear"])
+    parser.add_argument("--metric", type=str, default="spearman", help="Metric to use for evaluation.", choices=["spearman", "pearson", "mse"])
+    parser.add_argument("--num_cpus", type=int, default=32, help="Number of CPUs to use for training.")
+    parser.add_argument("--num_iterations", type=int, default=10, help="Number of iterations to run.")
+    args = parser.parse_args()
+    main(args)
