@@ -3,6 +3,7 @@ import json
 import argparse
 
 from multiprocessing import Pool
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 
@@ -201,15 +202,19 @@ def main(args):
     if not os.path.exists("results.csv"):
         get_leaderboard_df()
     df = pd.read_csv("results.csv")
+    df_original = df.copy()
 
     model = xgb.XGBRegressor if args.model == "xgboost" else LinearRegression
 
     removed_tasks = []
+    correlations = []
+    task_scores = []
 
     print(f"Using Model {args.model} and Metric {args.metric}")
 
     for i in range(args.num_iterations):
         predictions = leave_one_task_out(df, model, args.num_cpus)
+        predictions["Overall"] = predictions.drop(columns=["Model"]).mean(axis=1)
         results = calculate_task_scores(df, predictions, metric_map[args.metric])
 
         print(f"{args.metric} (ascending={ascending})")
@@ -217,16 +222,31 @@ def main(args):
 
         # remove the top task from the results
         task = results.T.sort_values(by=0, ascending=ascending).head(1).index[0]
+        task_score = results[task].values[0]
+        task_scores.append(task_score)
         print()
         print(f"Removing task: {task}")
-        print()
         df = df.drop(columns=[task])
         removed_tasks.append(task)
+
+        print("Correlation with original rankings")
+        df["Overall"] = df.drop(columns=["Model", "Overall"]).mean(axis=1)
+        correlation = spearman(df["Overall"], df_original["Overall"])
+        correlations.append(correlation)
+        print(spearman(df["Overall"], df_original["Overall"]))
+        print()
 
     print()
     print("Removed tasks:")
     for task in removed_tasks:
         print(task)
+    
+    # plot the correlations
+    plt.plot(correlations, label="Correlation using remaining tasks")
+    plt.plot(task_scores, label="Prediction correlation of excluded task")
+    plt.legend()
+    plt.title("Task Selection")
+    plt.savefig("correlations.png")
     
     df.to_csv("final_results.csv", index=False)
 
@@ -235,6 +255,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="linear", help="Model to use for training.", choices=["xgboost", "linear"])
     parser.add_argument("--metric", type=str, default="spearman", help="Metric to use for evaluation.", choices=["spearman", "pearson", "mse"])
     parser.add_argument("--num_cpus", type=int, default=32, help="Number of CPUs to use for training.")
-    parser.add_argument("--num_iterations", type=int, default=10, help="Number of iterations to run.")
+    parser.add_argument("--num_iterations", type=int, default=50, help="Number of iterations to run.")
     args = parser.parse_args()
     main(args)
