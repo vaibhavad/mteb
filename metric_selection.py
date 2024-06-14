@@ -148,6 +148,7 @@ def main():
     # new df with model name according to df, rank in df, rank in borda_df, change  in rank
     rank_df = pd.DataFrame()
     rank_df["Model"] = df["Model"]
+    rank_df["Overall score"] = df["Overall"]
     rank_df["Original Rank"] = df["Overall"].rank(method="min", ascending=False)
     rank_df["Borda Rank"] = borda_df["Overall"].rank(method="min", ascending=True)
     rank_df["Change in Rank"] = rank_df["Original Rank"] - rank_df["Borda Rank"]
