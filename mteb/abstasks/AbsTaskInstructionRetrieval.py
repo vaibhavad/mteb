@@ -450,6 +450,7 @@ class AbsTaskInstructionRetrieval(AbsTask):
             changed_instructions,
             top_ranked,
             lang,
+            original_instructions=og_instructions,
             **kwargs,
         )
 
@@ -593,6 +594,7 @@ class AbsTaskInstructionRetrieval(AbsTask):
         instructions: dict[str, str],
         top_ranked: dict[str, list[str]],
         lang=None,
+        original_instructions: dict[str, str] | None = None,
         **kwargs,
     ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
         start_time = time()
@@ -609,7 +611,11 @@ class AbsTaskInstructionRetrieval(AbsTask):
             }
             all_results.append(
                 retriever(
-                    cur_docs, cur_queries, instructions=cur_instructions, qid=query_id
+                    cur_docs,
+                    cur_queries,
+                    instructions=cur_instructions,
+                    qid=query_id,
+                    original_instructions=original_instructions,
                 )
             )
 

@@ -17,6 +17,7 @@ class InstructionRetrievalEvaluator(RetrievalEvaluator):
         queries: dict[str, str],
         instructions: dict[str, str],
         qid: str | None = None,
+        original_instructions: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, dict[str, float]]:
         if not self.retriever:
@@ -46,5 +47,6 @@ class InstructionRetrievalEvaluator(RetrievalEvaluator):
                 instructions=instructions,
                 request_qid=qid,
                 task_name=self.task_name,
+                original_instructions=original_instructions,
                 **kwargs,
             )

@@ -104,14 +104,23 @@ class DenseRetrievalExactSearch:
         instructions: dict[str, str] | None = None,
         request_qid: str | None = None,
         return_sorted: bool = False,
+        original_instructions: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, dict[str, float]]:
         logger.info("Encoding Queries.")
         query_ids = list(queries.keys())
         self.results = {qid: {} for qid in query_ids}
         queries = [queries[qid] for qid in queries]  # type: ignore
+        curr_queries = None
         if instructions:
-            queries = [f"{query} {instructions[query]}".strip() for query in queries]
+            curr_queries = [
+                f"{query} {instructions[query]}".strip() for query in queries
+            ]
+        original_queries = None
+        if original_instructions:
+            original_queries = [
+                f"{query} {original_instructions[query]}".strip() for query in queries
+            ]
         if isinstance(queries[0], list):  # type: ignore
             query_embeddings = self.encode_conversations(
                 model=self.model,
@@ -121,9 +130,11 @@ class DenseRetrievalExactSearch:
             )
         else:
             query_embeddings = self.model.encode(
-                queries,  # type: ignore
+                queries if curr_queries is None else curr_queries,  # type: ignore
                 task_name=task_name,
                 prompt_type=PromptType.query,
+                original_queries=queries,
+                original_queries_with_instructions=original_queries,
                 **self.encode_kwargs,
             )
 
@@ -414,14 +425,24 @@ class DRESModel:
         sentences: list[str],
         task_name: str,
         prompt_type: PromptType | None = None,
+        original_queries: list[str] | None = None,
+        original_queries_with_instructions: list[str] | None = None,
         **kwargs,
     ):
         if prompt_type and prompt_type == PromptType.passage:
+            assert original_queries is None, (
+                "original_queries is not supported for passage prompt type"
+            )
             return self.encode_corpus(
                 sentences, task_name, prompt_type=prompt_type, **kwargs
             )
         return self.model.encode(
-            sentences, task_name=task_name, prompt_type=prompt_type, **kwargs
+            sentences,
+            task_name=task_name,
+            prompt_type=prompt_type,
+            original_queries=original_queries,
+            original_queries_with_instructions=original_queries_with_instructions,
+            **kwargs,
         )
 
 
